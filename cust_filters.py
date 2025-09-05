@@ -22,9 +22,8 @@ from tg_bot.modules.connection import connected
 HANDLER_GROUP = 10
 BASIC_FILTER_STRING = "*Filters in this chat:*\n"
 
-
 @run_async
-def list_handlers(bot: Bot, update: Update, args=None):
+def list_handlers(bot: Bot, update: Update):
     chat = update.effective_chat  # type: Optional[Chat]
     user = update.effective_user  # type: Optional[User]
 
@@ -42,130 +41,39 @@ def list_handlers(bot: Bot, update: Update, args=None):
             chat_name = chat.title
             filter_list = "*Filters in {}*:\n"
 
-    # Get page number from args, default to 0
-    page = 0
-    if args and len(args) > 0:
-        try:
-            page = int(args[0]) - 1  # Convert to 0-based index
-            if page < 0:
-                page = 0
-        except ValueError:
-            page = 0
-
     all_handlers = sql.get_chat_triggers(chat_id)
 
     if not all_handlers:
         update.effective_message.reply_text("No filters in {}!".format(chat_name))
         return
 
-    # Pagination settings
-    items_per_page = 10
-    total_pages = (len(all_handlers) + items_per_page - 1) // items_per_page
+    # Telegram message length limit (approx 4096 characters)
+    max_length = 4000
+    current_message = f"*Filters in {chat_name}:*\n"
+    message_count = 1
     
-    # Ensure page is within bounds
-    if page >= total_pages:
-        page = total_pages - 1
-    if page < 0:
-        page = 0
-
-    # Get items for current page
-    start_idx = page * items_per_page
-    end_idx = min(start_idx + items_per_page, len(all_handlers))
-    page_handlers = all_handlers[start_idx:end_idx]
-
-    # Build the message
-    filter_list = f"*Filters in {chat_name} (Page {page+1}/{total_pages}):*\n"
-    for i, keyword in enumerate(page_handlers, start=1):
-        filter_list += f"{start_idx + i}. {escape_markdown(keyword)}\n"
-
-    # Build navigation buttons
-    buttons = []
-    if total_pages > 1:
-        nav_buttons = []
-        if page > 0:
-            nav_buttons.append(InlineKeyboardButton("◀️ Previous", callback_data=f"filters_prev_{chat_id}_{page}"))
-        if page < total_pages - 1:
-            nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"filters_next_{chat_id}_{page}"))
-        buttons.append(nav_buttons)
-
-    keyboard = InlineKeyboardMarkup(buttons) if buttons else None
-
-    update.effective_message.reply_text(filter_list, parse_mode=telegram.ParseMode.MARKDOWN, reply_markup=keyboard)
-
-@run_async
-def filters_callback(bot: Bot, update: Update):
-    query = update.callback_query
-    user = update.effective_user
-    data = query.data.split('_')
-    
-    if len(data) < 4:
-        query.answer("Invalid callback data.")
-        return
+    for i, keyword in enumerate(all_handlers, start=1):
+        entry = f"{i}. {escape_markdown(keyword)}\n"
         
-    action = data[1]
-    chat_id = int(data[2])
-    current_page = int(data[3])
-    
-    # Check if user has permission to view filters
-    from tg_bot.modules.helper_funcs.chat_status import is_user_admin
-    if not is_user_admin(update.effective_chat, user.id):
-        query.answer("You need to be an admin to view filters.")
-        return
+        # If adding this entry would exceed the max length, send the current message
+        # and start a new one
+        if len(current_message) + len(entry) > max_length:
+            update.effective_message.reply_text(
+                current_message, 
+                parse_mode=telegram.ParseMode.MARKDOWN
+            )
+            current_message = f"*Filters in {chat_name} (Continued {message_count}):*\n"
+            message_count += 1
+            
+        current_message += entry
 
-    # Calculate new page
-    if action == "prev":
-        new_page = current_page - 1
-    elif action == "next":
-        new_page = current_page + 1
-    else:
-        query.answer("Invalid action.")
-        return
+    # Send any remaining content
+    if current_message != f"*Filters in {chat_name}:*\n":
+        update.effective_message.reply_text(
+            current_message, 
+            parse_mode=telegram.ParseMode.MARKDOWN
+    )
 
-    all_handlers = sql.get_chat_triggers(chat_id)
-
-    if not all_handlers:
-        query.edit_message_text("No filters in this chat!")
-        return
-
-    # Pagination settings
-    items_per_page = 10
-    total_pages = (len(all_handlers) + items_per_page - 1) // items_per_page
-    
-    # Ensure page is within bounds
-    if new_page >= total_pages:
-        new_page = total_pages - 1
-    if new_page < 0:
-        new_page = 0
-
-    # Get items for current page
-    start_idx = new_page * items_per_page
-    end_idx = min(start_idx + items_per_page, len(all_handlers))
-    page_handlers = all_handlers[start_idx:end_idx]
-
-    # Build the message
-    chat_name = dispatcher.bot.getChat(chat_id).title
-    filter_list = f"*Filters in {chat_name} (Page {new_page+1}/{total_pages}):*\n"
-    for i, keyword in enumerate(page_handlers, start=1):
-        filter_list += f"{start_idx + i}. {escape_markdown(keyword)}\n"
-
-    # Build navigation buttons
-    buttons = []
-    if total_pages > 1:
-        nav_buttons = []
-        if new_page > 0:
-            nav_buttons.append(InlineKeyboardButton("◀️ Previous", callback_data=f"filters_prev_{chat_id}_{new_page}"))
-        if new_page < total_pages - 1:
-            nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"filters_next_{chat_id}_{new_page}"))
-        buttons.append(nav_buttons)
-
-    keyboard = InlineKeyboardMarkup(buttons) if buttons else None
-
-    try:
-        query.edit_message_text(text=filter_list, parse_mode=telegram.ParseMode.MARKDOWN, reply_markup=keyboard)
-        query.answer()
-    except Exception as e:
-        LOGGER.exception("Error in filters pagination: %s", str(e))
-        query.answer("Error updating filters list.")
 
 
 # NOT ASYNC BECAUSE DISPATCHER HANDLER RAISED
@@ -369,11 +277,10 @@ def __chat_settings__(chat_id, user_id):
     cust_filters = sql.get_chat_triggers(chat_id)
     return "There are `{}` custom filters here.".format(len(cust_filters))
 
-FILTERS_CALLBACK_HANDLER = CallbackQueryHandler(filters_callback, pattern=r"filters_")
-dispatcher.add_handler(FILTERS_CALLBACK_HANDLER)
+
 
 __help__ = """
- - /filters: list all active filters in this chat. Use /filters <page> to view specific pages.
+ - /filters: list all active filters in this chat.
 
 *Admin only:*
  - /filter <keyword> <reply message>: add a filter to this chat. The bot will now reply that message whenever 'keyword'\
@@ -387,7 +294,7 @@ __mod_name__ = "Filters"
 
 FILTER_HANDLER = CommandHandler("filter", filters)
 STOP_HANDLER = CommandHandler("stop", stop_filter)
-LIST_HANDLER = DisableAbleCommandHandler("filters", list_handlers, pass_args=True, admin_ok=True)
+LIST_HANDLER = DisableAbleCommandHandler("filters", list_handlers, admin_ok=True)
 CUST_FILTER_HANDLER = MessageHandler(CustomFilters.has_text, reply_filter, edited_updates=True)
 
 dispatcher.add_handler(FILTER_HANDLER)
